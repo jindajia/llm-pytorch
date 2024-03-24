@@ -384,10 +384,10 @@ def main(argv: Sequence[str] | None = None) -> int:  # pragma: no cover
                 step_loss = 0.0
                 if completed_steps%100 == 0:
                     losses = []
-                    for _ in range(3):
-                        if eval_iter is not None:
+                    for _ in range(2):
+                        try:
                             batch = next(eval_iter)
-                        else:
+                        except Exception as _:
                             eval_iter = iter(eval_dataloader)
                             batch = next(eval_iter)
                         with torch.no_grad():
@@ -436,7 +436,7 @@ def main(argv: Sequence[str] | None = None) -> int:  # pragma: no cover
         model.eval()
         losses = []
         for _ in range(10):
-            if eval_iter is not None:
+            try:
                 batch = next(eval_iter)
             else:
                 eval_iter = iter(eval_dataloader)
