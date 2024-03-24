@@ -438,7 +438,7 @@ def main(argv: Sequence[str] | None = None) -> int:  # pragma: no cover
         for _ in range(10):
             try:
                 batch = next(eval_iter)
-            else:
+            except Exception as _:
                 eval_iter = iter(eval_dataloader)
                 batch = next(eval_iter)
             with torch.no_grad():
