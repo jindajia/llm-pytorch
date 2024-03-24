@@ -122,14 +122,7 @@ def main(argv: Sequence[str] | None = None) -> int:  # pragma: no cover
 
     logger.info(accelerator.state, extra={'ranks': [0]})
 
-    # raw_datasets = get_datasets(
-    #     dataset_name=args.dataset_name,
-    #     dataset_config_name=args.dataset_config_name,
-    #     validation_split_percentage=args.validation_split_percentage,
-    #     train_file=args.train_file,
-    #     validation_file=args.validation_file,
-    #     keep_linebreaks=not args.no_keep_linebreaks,
-    # )
+
 
     model, tokenizer = load_model(
         config_name=args.config_name,
@@ -139,19 +132,28 @@ def main(argv: Sequence[str] | None = None) -> int:  # pragma: no cover
         use_slow_tokenizer=args.use_slow_tokenizer,
         low_cpu_mem_usage=args.low_cpu_mem_usage,
     )
+    if False:
+        raw_datasets = get_datasets(
+            dataset_name=args.dataset_name,
+            dataset_config_name=args.dataset_config_name,
+            validation_split_percentage=args.validation_split_percentage,
+            train_file=args.train_file,
+            validation_file=args.validation_file,
+            keep_linebreaks=not args.no_keep_linebreaks,
+        )
+        lm_datasets = preprocess_datasets(
+            raw_datasets=raw_datasets,
+            tokenizer=tokenizer,
+            accelerator=accelerator,
+            num_workers=args.preprocessing_num_workers,
+            overwrite_cache=args.overwrite_cache,
+            block_size=args.block_size,
+        )
 
-    # lm_datasets = preprocess_datasets(
-    #     raw_datasets=raw_datasets,
-    #     tokenizer=tokenizer,
-    #     accelerator=accelerator,
-    #     num_workers=args.preprocessing_num_workers,
-    #     overwrite_cache=args.overwrite_cache,
-    #     block_size=args.block_size,
-    # )
-
-    # train_dataset = lm_datasets['train']
-    # eval_dataset = lm_datasets['validation']
-    train_dataset, eval_dataset, test_dataset = get_megatron_dataset(args)
+        train_dataset = lm_datasets['train']
+        eval_dataset = lm_datasets['validation']
+    else:
+        train_dataset, eval_dataset, test_dataset = get_megatron_dataset(args)
 
     train_dataloader = DataLoader(
         train_dataset,
