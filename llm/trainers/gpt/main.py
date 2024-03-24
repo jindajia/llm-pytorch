@@ -153,6 +153,7 @@ def main(argv: Sequence[str] | None = None) -> int:  # pragma: no cover
         train_dataset = lm_datasets['train']
         eval_dataset = lm_datasets['validation']
     else:
+        compile_helpers()
         train_dataset, eval_dataset, test_dataset = get_megatron_dataset(args)
 
     train_dataloader = DataLoader(
