@@ -48,6 +48,13 @@ from llm.trainers.gpt.optimizer import get_preconditioner
 from llm.utils import create_summary_writer
 from llm.utils import log_step
 
+from llm.trainers.gpt.datasets_megatron.core_class.indexed_dataset import MMapIndexedDataset
+from llm.trainers.gpt.datasets_megatron.core_class.gpt_dataset import GPTDataset, GPTDatasetConfig
+from transformers import AutoTokenizer
+from llm.trainers.gpt.datasets_megatron.core_class.utils import Split
+from llm.trainers.gpt.datasets_megatron.core_class.blended_megatron_dataset_builder import BlendedMegatronDatasetBuilder
+from llm.trainers.gpt.datasets_megatron.core_class.utils import compile_helpers
+
 logger = logging.getLogger('llm.trainers.gpt')
 
 LOG_FMT = (
@@ -55,6 +62,45 @@ LOG_FMT = (
     'samples/s: {samples_per_second:.2f} | time (s): {time:.3f}'
 )
 
+
+def get_megatron_dataset(args) -> torch.utils.data.Dataset:
+    def is_dataset_built_on_rank():
+        return True
+
+    tokenizer = AutoTokenizer.from_pretrained(args.tokenizer_name)
+    sequence_length = 1024
+    data_path = ['/N/scratch/jindjia/thepile/pile_text_document']
+
+    # blend: path to bin, idx with dataset prefix
+    # radom seed: logic has removed, we don't shuffle the data in this step. Because we have shuffle function later.
+    # sequence lengh: normaly 1024 for GPT2
+    # split: split the dataset[(0, 96%), (96%, 99.9%), (99.9%, 100%)]
+    # path_to_cache: path to cache, store dataset index cache
+    dataset_config = GPTDatasetConfig(
+        is_built_on_rank=is_dataset_built_on_rank,
+        random_seed=1234,
+        sequence_length=sequence_length,
+        blend=data_path,
+        blend_per_split=None,
+        split='969, 30, 1',
+        path_to_cache='/N/slate/jindjia/bash_scripts/baixi/cache',
+        return_document_ids=False,
+        reset_position_ids=False,
+        reset_attention_mask=False,
+        eod_mask_loss=False,
+        eod_id=tokenizer("<|endoftext|>")["input_ids"][0]
+    )
+
+    # don't need to care about train_val_test_num_samples, this is a logic in megatron to calculate training epoch, just set a small value.
+    train_val_test_num_samples = [1,
+                                  1,
+                                  1]
+    train_ds, valid_ds, test_ds = BlendedMegatronDatasetBuilder(
+        GPTDataset,
+        train_val_test_num_samples,
+        dataset_config
+    ).build()
+    return train_ds, valid_ds, test_ds
 
 def main(argv: Sequence[str] | None = None) -> int:  # pragma: no cover
     args = parse_args(argv)
@@ -76,14 +122,7 @@ def main(argv: Sequence[str] | None = None) -> int:  # pragma: no cover
 
     logger.info(accelerator.state, extra={'ranks': [0]})
 
-    raw_datasets = get_datasets(
-        dataset_name=args.dataset_name,
-        dataset_config_name=args.dataset_config_name,
-        validation_split_percentage=args.validation_split_percentage,
-        train_file=args.train_file,
-        validation_file=args.validation_file,
-        keep_linebreaks=not args.no_keep_linebreaks,
-    )
+
 
     model, tokenizer = load_model(
         config_name=args.config_name,
@@ -93,18 +132,29 @@ def main(argv: Sequence[str] | None = None) -> int:  # pragma: no cover
         use_slow_tokenizer=args.use_slow_tokenizer,
         low_cpu_mem_usage=args.low_cpu_mem_usage,
     )
+    if False:
+        raw_datasets = get_datasets(
+            dataset_name=args.dataset_name,
+            dataset_config_name=args.dataset_config_name,
+            validation_split_percentage=args.validation_split_percentage,
+            train_file=args.train_file,
+            validation_file=args.validation_file,
+            keep_linebreaks=not args.no_keep_linebreaks,
+        )
+        lm_datasets = preprocess_datasets(
+            raw_datasets=raw_datasets,
+            tokenizer=tokenizer,
+            accelerator=accelerator,
+            num_workers=args.preprocessing_num_workers,
+            overwrite_cache=args.overwrite_cache,
+            block_size=args.block_size,
+        )
 
-    lm_datasets = preprocess_datasets(
-        raw_datasets=raw_datasets,
-        tokenizer=tokenizer,
-        accelerator=accelerator,
-        num_workers=args.preprocessing_num_workers,
-        overwrite_cache=args.overwrite_cache,
-        block_size=args.block_size,
-    )
-
-    train_dataset = lm_datasets['train']
-    eval_dataset = lm_datasets['validation']
+        train_dataset = lm_datasets['train']
+        eval_dataset = lm_datasets['validation']
+    else:
+        compile_helpers()
+        train_dataset, eval_dataset, test_dataset = get_megatron_dataset(args)
 
     train_dataloader = DataLoader(
         train_dataset,
@@ -274,6 +324,7 @@ def main(argv: Sequence[str] | None = None) -> int:  # pragma: no cover
     global_step_timer = Timer()
     step_loss = 0.0
 
+    eval_iter = iter(eval_dataloader)
     for epoch in range(starting_epoch, args.num_train_epochs):
         model.train()
         for step, batch in enumerate(train_dataloader):
@@ -331,6 +382,39 @@ def main(argv: Sequence[str] | None = None) -> int:  # pragma: no cover
                     skip_tensorboard=['phase', 'time'],
                 )
                 step_loss = 0.0
+                if completed_steps%100 == 0:
+                    losses = []
+                    for _ in range(2):
+                        try:
+                            batch = next(eval_iter)
+                        except Exception as _:
+                            eval_iter = iter(eval_dataloader)
+                            batch = next(eval_iter)
+                        with torch.no_grad():
+                            outputs = model(**batch)
+
+                        loss = outputs.loss
+                        losses.append(
+                            accelerator.gather_for_metrics(
+                                loss.repeat(args.per_device_eval_batch_size),
+                            ),
+                        )
+
+                    losses = torch.cat(losses)
+                    try:
+                        eval_loss = torch.mean(losses)
+                        perplexity = math.exp(eval_loss)
+                    except OverflowError:
+                        perplexity = float('inf')
+
+                    if writer is not None:
+                        writer.add_scalar(f'validation/loss', eval_loss, completed_steps)
+                        writer.add_scalar(f'validation/perplexity', perplexity, completed_steps)
+                    logger.info(
+                        f'Validation | step: {completed_steps} | eval_loss: {eval_loss:.3f} | '
+                        f'perplexity: {perplexity:.3f}',
+                        extra={'ranks': [0]},
+                    )
 
             if (
                 isinstance(checkpointing_steps, int)
@@ -351,7 +435,12 @@ def main(argv: Sequence[str] | None = None) -> int:  # pragma: no cover
 
         model.eval()
         losses = []
-        for _step, batch in enumerate(eval_dataloader):
+        for _ in range(10):
+            try:
+                batch = next(eval_iter)
+            except Exception as _:
+                eval_iter = iter(eval_dataloader)
+                batch = next(eval_iter)
             with torch.no_grad():
                 outputs = model(**batch)
 

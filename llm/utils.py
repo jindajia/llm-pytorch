@@ -210,8 +210,8 @@ def log_step(
         msg = fmt_str.format(**values)
     else:
         msg = ' | '.join(f'{name}: {value}' for name, value in values.items())
-
-    logger.log(log_level, msg, extra={'ranks': ranks})
+    if step % 2 == 0:
+        logger.log(log_level, msg, extra={'ranks': ranks})
     if writer is not None:
         for name, value in kwargs.items():
             if name not in skip_tensorboard:
